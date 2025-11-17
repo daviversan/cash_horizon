@@ -1,0 +1,24 @@
+date,amount,category,type,description
+2024-01-15,500000.00,Funding,income,Initial seed funding round
+2024-02-01,45000.00,Salaries,expense,Monthly salaries for engineering team
+2024-02-01,5000.00,Rent,expense,Office space rent
+2024-02-05,3500.00,Infrastructure,expense,AWS and cloud services
+2024-02-10,15000.00,Service Revenue,income,Customer payments for SaaS subscriptions
+2024-02-15,8000.00,Marketing,expense,Digital marketing and advertising
+2024-02-20,2000.00,Software,expense,Software licenses and subscriptions
+2024-03-01,45000.00,Salaries,expense,Monthly salaries for engineering team
+2024-03-01,5000.00,Rent,expense,Office space rent
+2024-03-05,3500.00,Infrastructure,expense,AWS and cloud services
+2024-03-10,17000.00,Service Revenue,income,Customer payments for SaaS subscriptions
+2024-03-15,8000.00,Marketing,expense,Digital marketing and advertising
+2024-03-18,12000.00,Consulting,income,Consulting project payment
+2024-03-20,2000.00,Software,expense,Software licenses and subscriptions
+2024-03-25,15000.00,Legal,expense,Legal consultation and patent filing
+2024-04-01,45000.00,Salaries,expense,Monthly salaries for engineering team
+2024-04-01,5000.00,Rent,expense,Office space rent
+2024-04-05,3500.00,Infrastructure,expense,AWS and cloud services
+2024-04-10,19000.00,Service Revenue,income,Customer payments for SaaS subscriptions
+2024-04-15,8000.00,Marketing,expense,Digital marketing and advertising
+2024-04-20,2000.00,Software,expense,Software licenses and subscriptions
+2024-04-25,25000.00,Equipment,expense,New laptops for development team
+
