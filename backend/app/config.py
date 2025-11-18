@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_model: str = "gemini-2.0-flash-exp"
     
+    # Google Custom Search API
+    google_search_api_key: str = ""
+    google_search_engine_id: str = ""
+    google_search_enabled: bool = False  # Set to True when API keys are configured
+    search_max_results: int = 10
+    search_safe_mode: str = "active"
+    
     # Google Cloud (for deployment)
     google_cloud_project: str = ""
     google_application_credentials: str = ""

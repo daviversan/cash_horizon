@@ -5,6 +5,16 @@ from typing import Any, Dict, List, Optional
 import httpx
 from datetime import datetime
 
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    GOOGLE_SEARCH_AVAILABLE = True
+except ImportError:
+    GOOGLE_SEARCH_AVAILABLE = False
+    logger.warning("Google API client not installed. Install with: pip install google-api-python-client")
+
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -12,24 +22,104 @@ class WebSearch:
     """
     Web search tool for researching investment options and market data.
     
-    In production, this would integrate with Google Search API or similar.
-    For demo purposes, provides curated investment recommendations.
+    Integrates with Google Custom Search API for real-time web search.
+    Falls back to curated recommendations if API is not configured.
     
     Features:
-    - Investment option research
-    - Market trends
-    - Financial advice aggregation
+    - Investment option research (real-time via Google Search)
+    - Market trends (real-time financial news)
+    - Financial advice aggregation (from trusted sources)
+    - Automatic fallback to curated data if API unavailable
     """
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, search_engine_id: Optional[str] = None):
         """
         Initialize web search tool.
         
         Args:
-            api_key: Optional API key for search service
+            api_key: Google Custom Search API key (or uses settings.google_search_api_key)
+            search_engine_id: Programmable Search Engine ID (or uses settings.google_search_engine_id)
         """
-        self.api_key = api_key
+        self.api_key = api_key or settings.google_search_api_key
+        self.search_engine_id = search_engine_id or settings.google_search_engine_id
+        self.enabled = settings.google_search_enabled and GOOGLE_SEARCH_AVAILABLE
         self.client = httpx.AsyncClient(timeout=30.0)
+        
+        # Initialize Google Search service if available
+        self.search_service = None
+        if self.enabled and self.api_key and self.search_engine_id:
+            try:
+                self.search_service = build("customsearch", "v1", developerKey=self.api_key)
+                logger.info("Google Custom Search API initialized successfully")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Google Search API: {e}. Using fallback mode.")
+                self.enabled = False
+        else:
+            logger.info("Google Search API not configured. Using curated fallback data.")
+    
+    async def _google_search(
+        self,
+        query: str,
+        num_results: int = None,
+        date_restrict: Optional[str] = None,
+        site_search: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Perform Google Custom Search API query.
+        
+        Args:
+            query: Search query string
+            num_results: Number of results to return (max 10 per request)
+            date_restrict: Date restriction (e.g., 'd7' for last 7 days, 'm1' for last month)
+            site_search: Restrict search to specific site
+            
+        Returns:
+            List of search result dictionaries
+        """
+        if not self.enabled or not self.search_service:
+            return []
+        
+        try:
+            num_results = num_results or settings.search_max_results
+            
+            # Build search parameters
+            search_params = {
+                'q': query,
+                'cx': self.search_engine_id,
+                'num': min(num_results, 10),  # API limit is 10 per request
+                'safe': settings.search_safe_mode
+            }
+            
+            if date_restrict:
+                search_params['dateRestrict'] = date_restrict
+            
+            if site_search:
+                search_params['siteSearch'] = site_search
+            
+            # Execute search
+            result = self.search_service.cse().list(**search_params).execute()
+            
+            # Parse results
+            search_results = []
+            if 'items' in result:
+                for item in result['items']:
+                    search_results.append({
+                        'title': item.get('title', ''),
+                        'link': item.get('link', ''),
+                        'snippet': item.get('snippet', ''),
+                        'source': item.get('displayLink', ''),
+                        'timestamp': datetime.utcnow().isoformat()
+                    })
+            
+            logger.info(f"Google Search returned {len(search_results)} results for query: {query}")
+            return search_results
+            
+        except HttpError as e:
+            logger.error(f"Google Search API error: {e}", exc_info=True)
+            return []
+        except Exception as e:
+            logger.error(f"Error performing Google search: {e}", exc_info=True)
+            return []
     
     async def search_investment_options(
         self,
@@ -37,7 +127,7 @@ class WebSearch:
         risk_tolerance: str = "moderate"
     ) -> Dict[str, Any]:
         """
-        Search for suitable investment options.
+        Search for suitable investment options using Google Search or curated data.
         
         Args:
             company_stage: Stage of company (seed, early, growth, mature)
@@ -52,22 +142,36 @@ class WebSearch:
                 extra={"stage": company_stage, "risk": risk_tolerance}
             )
             
-            # For demo: Provide curated investment recommendations
-            # In production: Call Google Search API or financial data API
+            # Try real-time Google Search first
+            google_results = []
+            if self.enabled:
+                # Construct optimized search query for financial sites
+                search_query = f"best {risk_tolerance} risk investment options for startups {company_stage} stage 2024"
+                google_results = await self._google_search(
+                    query=search_query,
+                    num_results=5,
+                    date_restrict='m3'  # Last 3 months for current data
+                )
             
-            investment_options = self._get_curated_investment_options(
+            # Get curated recommendations (always include as baseline)
+            curated_options = self._get_curated_investment_options(
                 company_stage,
                 risk_tolerance
             )
             
+            # Build result combining both sources
             result = {
                 "query": f"Investment options for {company_stage} stage {risk_tolerance} risk",
                 "timestamp": datetime.utcnow().isoformat(),
-                "options": investment_options,
-                "source": "curated_recommendations"
+                "options": curated_options,
+                "web_research": google_results if google_results else [],
+                "source": "google_search_and_curated" if google_results else "curated_recommendations",
+                "search_enabled": self.enabled
             }
             
-            logger.info(f"Found {len(investment_options)} investment options")
+            logger.info(
+                f"Found {len(curated_options)} curated options + {len(google_results)} web results"
+            )
             
             return result
             
@@ -75,7 +179,8 @@ class WebSearch:
             logger.error(f"Error searching investment options: {e}", exc_info=True)
             return {
                 "error": str(e),
-                "options": []
+                "options": [],
+                "web_research": []
             }
     
     async def search_market_trends(
@@ -84,7 +189,7 @@ class WebSearch:
         region: str = "global"
     ) -> Dict[str, Any]:
         """
-        Search for market trends in specific industry.
+        Search for market trends in specific industry using real-time news.
         
         Args:
             industry: Industry to research
@@ -99,17 +204,32 @@ class WebSearch:
                 extra={"industry": industry, "region": region}
             )
             
-            # For demo: Provide general market insights
-            # In production: Call news/trends API
+            # Try real-time Google Search for news
+            google_results = []
+            if self.enabled:
+                # Search for recent market trends and news
+                search_query = f"{industry} market trends {region} news analysis 2024"
+                google_results = await self._google_search(
+                    query=search_query,
+                    num_results=5,
+                    date_restrict='m1'  # Last month for current trends
+                )
             
-            trends = self._get_market_trends(industry, region)
+            # Get general market insights as fallback
+            fallback_trends = self._get_market_trends(industry, region)
             
             result = {
                 "query": f"{industry} market trends in {region}",
                 "timestamp": datetime.utcnow().isoformat(),
-                "trends": trends,
-                "source": "market_analysis"
+                "trends": fallback_trends,
+                "news_articles": google_results if google_results else [],
+                "source": "google_news_and_analysis" if google_results else "market_analysis",
+                "search_enabled": self.enabled
             }
+            
+            logger.info(
+                f"Found {len(fallback_trends)} trend insights + {len(google_results)} news articles"
+            )
             
             return result
             
@@ -117,7 +237,8 @@ class WebSearch:
             logger.error(f"Error searching market trends: {e}", exc_info=True)
             return {
                 "error": str(e),
-                "trends": []
+                "trends": [],
+                "news_articles": []
             }
     
     async def search_financial_advice(
@@ -126,7 +247,7 @@ class WebSearch:
         context: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Search for financial advice on specific topic.
+        Search for financial advice on specific topic from trusted sources.
         
         Args:
             topic: Topic to research (e.g., "startup runway", "burn rate")
@@ -141,18 +262,36 @@ class WebSearch:
                 extra={"topic": topic, "context": context}
             )
             
-            # For demo: Provide curated financial advice
-            # In production: Aggregate from financial advisory sources
+            # Try real-time Google Search from financial advisory sites
+            google_results = []
+            if self.enabled:
+                # Build context-aware search query
+                search_query = f"{topic} financial advice best practices"
+                if context:
+                    search_query += f" {context}"
+                
+                google_results = await self._google_search(
+                    query=search_query,
+                    num_results=5,
+                    date_restrict='y1'  # Last year for relevant advice
+                )
             
-            advice = self._get_financial_advice(topic, context)
+            # Get curated advice as baseline
+            curated_advice = self._get_financial_advice(topic, context)
             
             result = {
                 "query": topic,
                 "context": context,
                 "timestamp": datetime.utcnow().isoformat(),
-                "advice": advice,
-                "source": "financial_advisory"
+                "advice": curated_advice,
+                "web_sources": google_results if google_results else [],
+                "source": "google_search_and_curated" if google_results else "financial_advisory",
+                "search_enabled": self.enabled
             }
+            
+            logger.info(
+                f"Found {len(curated_advice)} curated advice + {len(google_results)} web sources"
+            )
             
             return result
             
@@ -160,7 +299,8 @@ class WebSearch:
             logger.error(f"Error searching financial advice: {e}", exc_info=True)
             return {
                 "error": str(e),
-                "advice": []
+                "advice": [],
+                "web_sources": []
             }
     
     def _get_curated_investment_options(

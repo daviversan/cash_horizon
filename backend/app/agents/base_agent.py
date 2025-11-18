@@ -203,6 +203,47 @@ class BaseAgent(ABC):
             
             raise
     
+    def _convert_tools_to_gemini_format(
+        self,
+        tools: List[Dict[str, Any]]
+    ) -> List[types.Tool]:
+        """
+        Convert tool definitions to Gemini ADK format.
+        
+        Args:
+            tools: List of tool definitions (simple dict format)
+            
+        Returns:
+            List of Gemini Tool objects with FunctionDeclarations
+        """
+        gemini_tools = []
+        
+        for tool in tools:
+            try:
+                # Create FunctionDeclaration for each tool
+                function_declaration = types.FunctionDeclaration(
+                    name=tool["name"],
+                    description=tool["description"],
+                    parameters=tool.get("parameters", {
+                        "type": "object",
+                        "properties": {},
+                        "required": []
+                    })
+                )
+                
+                # Wrap in Tool object
+                gemini_tool = types.Tool(
+                    function_declarations=[function_declaration]
+                )
+                gemini_tools.append(gemini_tool)
+                
+            except Exception as e:
+                logger.warning(f"Failed to convert tool {tool.get('name', 'unknown')}: {e}")
+                continue
+        
+        logger.debug(f"Converted {len(gemini_tools)} tools to Gemini format")
+        return gemini_tools
+    
     async def _call_gemini(
         self,
         system_prompt: str,
@@ -210,7 +251,12 @@ class BaseAgent(ABC):
         tools: List[Dict[str, Any]]
     ) -> Any:
         """
-        Call Gemini API with system prompt, user prompt, and tools.
+        Call Gemini API with proper ADK function calling support.
+        
+        This implements the full function calling flow:
+        1. Initial call with tools available
+        2. If function called, execute it
+        3. Return results to Gemini for final response
         
         Args:
             system_prompt: System instructions for the agent
@@ -218,31 +264,147 @@ class BaseAgent(ABC):
             tools: List of available tools
             
         Returns:
-            Gemini API response
+            Gemini API response with final text or tool results
         """
         try:
-            # Configure the model with tools
+            # Convert tools to Gemini format
+            gemini_tools = self._convert_tools_to_gemini_format(tools)
+            
+            # Configure function calling behavior
+            tool_config = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode=types.FunctionCallingConfig.Mode.AUTO  # Gemini decides when to use tools
+                )
+            )
+            
+            # Build config with tools
             config = types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=0.7,
                 top_p=0.9,
                 top_k=40,
                 max_output_tokens=2048,
+                tools=gemini_tools if gemini_tools else None,
+                tool_config=tool_config if gemini_tools else None
             )
             
-            # For now, we'll use the basic generate_content
-            # In production, you'd use the ADK framework with proper tool integration
+            # Initial call to Gemini
             response = self.client.models.generate_content(
                 model=self.model,
                 contents=user_prompt,
                 config=config
             )
             
+            # Check if Gemini wants to call a function
+            if response.candidates and len(response.candidates) > 0:
+                candidate = response.candidates[0]
+                
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        # Check if this part is a function call
+                        if hasattr(part, 'function_call') and part.function_call:
+                            function_call = part.function_call
+                            logger.info(
+                                f"Gemini requested function call: {function_call.name}",
+                                extra={"session_id": self.session_id}
+                            )
+                            
+                            # Execute the tool
+                            tool_result = await self.process_tool_call(
+                                tool_name=function_call.name,
+                                tool_args=dict(function_call.args)
+                            )
+                            
+                            # Build multi-turn conversation with function result
+                            final_response = await self._call_gemini_with_tool_result(
+                                system_prompt=system_prompt,
+                                user_prompt=user_prompt,
+                                function_call=function_call,
+                                function_result=tool_result,
+                                config=config
+                            )
+                            
+                            return final_response
+            
+            # No function call - return direct response
             return response
             
         except Exception as e:
             logger.error(
                 f"Gemini API call failed",
+                extra={
+                    "session_id": self.session_id,
+                    "error": str(e)
+                }
+            )
+            raise
+    
+    async def _call_gemini_with_tool_result(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        function_call: Any,
+        function_result: Dict[str, Any],
+        config: types.GenerateContentConfig
+    ) -> Any:
+        """
+        Make second Gemini call with tool execution results.
+        
+        This completes the function calling flow by providing the tool
+        results back to Gemini for final response generation.
+        
+        Args:
+            system_prompt: System instructions
+            user_prompt: Original user prompt
+            function_call: The function call from Gemini
+            function_result: Results from executing the tool
+            config: Generation config to reuse
+            
+        Returns:
+            Final Gemini response with tool results incorporated
+        """
+        try:
+            # Build multi-turn conversation history
+            contents = [
+                # Turn 1: User's request
+                types.Content(
+                    role="user",
+                    parts=[types.Part(text=user_prompt)]
+                ),
+                # Turn 2: Model's function call
+                types.Content(
+                    role="model",
+                    parts=[types.Part(function_call=function_call)]
+                ),
+                # Turn 3: Function result
+                types.Content(
+                    role="user",
+                    parts=[types.Part(
+                        function_response=types.FunctionResponse(
+                            name=function_call.name,
+                            response=function_result
+                        )
+                    )]
+                )
+            ]
+            
+            # Make final call with tool results
+            final_response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config
+            )
+            
+            logger.info(
+                f"Received final response after tool execution",
+                extra={"session_id": self.session_id}
+            )
+            
+            return final_response
+            
+        except Exception as e:
+            logger.error(
+                f"Failed to process tool result with Gemini",
                 extra={
                     "session_id": self.session_id,
                     "error": str(e)
